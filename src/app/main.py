@@ -395,6 +395,194 @@ def render_portfolio_tab(
 
 
 # ---------------------------------------------------------------------------
+# Tab 4: Screening analysis log
+# ---------------------------------------------------------------------------
+
+
+def _build_screening_log(
+    features: pd.DataFrame,
+    backtest: pd.DataFrame,
+    config: dict,
+    ticker_master: pd.DataFrame | None,
+) -> dict:
+    """Re-run screening steps and collect per-step statistics."""
+    cfg = config
+    ci = cfg["capital_inflow"]
+    entry = cfg["entry"]
+    exclusion = cfg["exclusion"]
+
+    target_date = features["date"].max()
+    df = features[features["date"] == target_date].copy()
+
+    log: dict = {
+        "target_date": target_date,
+        "steps": [],
+        "inflow_breakdown": [],
+        "near_miss": pd.DataFrame(),
+    }
+
+    total = len(df)
+    log["steps"].append(("全銘柄（対象日付）", total))
+
+    if df.empty:
+        return log
+
+    # Liquidity filter
+    df = df[df["liquidity_flag"]].copy()
+    log["steps"].append(("流動性フィルター通過", len(df)))
+    after_liquidity = len(df)
+
+    if df.empty:
+        return log
+
+    # Capital inflow breakdown (individual condition counts)
+    log["inflow_breakdown"] = [
+        ("出来高倍率 >= {:.1f}".format(ci["turnover_ratio_5d_min"]),
+         int((df["turnover_ratio_5d"] >= ci["turnover_ratio_5d_min"]).sum()),
+         after_liquidity),
+        ("20日高値ブレイク",
+         int(df["high_20_break_flag"].sum()),
+         after_liquidity),
+        ("陽線 (close > open)",
+         int((df["close"] > df["open"]).sum()),
+         after_liquidity),
+        ("ATR比率 >= {:.0%}".format(ci["atr14_ratio_min"]),
+         int((df["atr14_ratio"] >= ci["atr14_ratio_min"]).sum()),
+         after_liquidity),
+        ("直近3日リターン <= {:.0%}".format(ci["recent_3day_return_max"]),
+         int((df["recent_3day_return"] <= ci["recent_3day_return_max"]).sum()),
+         after_liquidity),
+    ]
+
+    df = df[
+        (df["turnover_ratio_5d"] >= ci["turnover_ratio_5d_min"])
+        & (df["high_20_break_flag"])
+        & (df["close"] > df["open"])
+        & (df["atr14_ratio"] >= ci["atr14_ratio_min"])
+        & (df["recent_3day_return"] <= ci["recent_3day_return_max"])
+    ].copy()
+    log["steps"].append(("資金流入フィルター通過（5条件AND）", len(df)))
+
+    if df.empty:
+        return log
+
+    # Limit-up exclusion
+    if exclusion["limit_up_next_day"]:
+        df = df[((df["close"] - df["open"]) / df["open"]) < 0.15].copy()
+        log["steps"].append(("ストップ高近似除外後", len(df)))
+
+    if df.empty:
+        return log
+
+    # Backtest join
+    bt_1d = backtest[backtest["hold_days"] == 1][
+        ["ticker", "weighted_median_return", "weighted_win_rate", "weighted_dd_median"]
+    ].copy()
+    df = df.merge(bt_1d, on="ticker", how="inner")
+    log["steps"].append(("バックテスト結合後", len(df)))
+
+    if df.empty:
+        return log
+
+    # Build near-miss info before final filter
+    def _ticker_name(t: str) -> str:
+        if ticker_master is not None and not ticker_master.empty:
+            m = ticker_master[ticker_master["ticker"] == t]
+            if not m.empty:
+                return m["company_name"].iloc[0]
+        return "---"
+
+    cols = ["ticker", "weighted_median_return", "weighted_win_rate", "weighted_dd_median"]
+    near = df[cols].copy()
+    near["銘柄名"] = near["ticker"].apply(_ticker_name)
+    near["期待リターン判定"] = near["weighted_median_return"].apply(
+        lambda x: "OK" if x >= entry["expected_return_1d_min"] else "NG"
+    )
+    near["勝率判定"] = near["weighted_win_rate"].apply(
+        lambda x: "OK" if x >= entry["win_rate_min"] else "NG"
+    )
+    near["DD判定"] = near["weighted_dd_median"].apply(
+        lambda x: "OK" if x >= entry["dd_median_max"] else "NG"
+    )
+    log["near_miss"] = near
+
+    # Entry criteria
+    df = df[
+        (df["weighted_median_return"] >= entry["expected_return_1d_min"])
+        & (df["weighted_win_rate"] >= entry["win_rate_min"])
+        & (df["weighted_dd_median"] >= entry["dd_median_max"])
+    ].copy()
+    log["steps"].append(("エントリー基準通過", len(df)))
+
+    log["entry_thresholds"] = entry
+    return log
+
+
+def render_log_tab(
+    features: pd.DataFrame,
+    backtest: pd.DataFrame,
+    config: dict,
+    ticker_master: pd.DataFrame | None,
+) -> None:
+    """Render the screening analysis log tab."""
+    log = _build_screening_log(features, backtest, config, ticker_master)
+
+    target_date = log["target_date"]
+    st.caption(f"解析対象日: {pd.Timestamp(target_date).strftime('%Y-%m-%d')}")
+
+    # Funnel table
+    st.subheader("スクリーニング フィルター推移")
+    funnel_data = []
+    for i, (step_name, count) in enumerate(log["steps"]):
+        prev = log["steps"][i - 1][1] if i > 0 else count
+        drop = prev - count if i > 0 else 0
+        funnel_data.append({
+            "ステップ": step_name,
+            "残存銘柄数": count,
+            "除外数": f"-{drop}" if drop > 0 else "—",
+        })
+    st.table(pd.DataFrame(funnel_data))
+
+    # Capital inflow breakdown
+    if log["inflow_breakdown"]:
+        st.subheader("資金流入条件（個別通過数）")
+        breakdown_data = []
+        for cond_name, passed, total in log["inflow_breakdown"]:
+            breakdown_data.append({
+                "条件": cond_name,
+                "通過数": f"{passed} / {total}",
+                "通過率": f"{passed / total * 100:.1f}%" if total > 0 else "—",
+            })
+        st.table(pd.DataFrame(breakdown_data))
+
+    # Near-miss details
+    near = log.get("near_miss", pd.DataFrame())
+    if not near.empty:
+        st.subheader("エントリー基準の判定詳細")
+        entry_th = log.get("entry_thresholds", {})
+        if entry_th:
+            st.caption(
+                f"閾値: 期待リターン >= {entry_th.get('expected_return_1d_min', 0):+.2%}　"
+                f"勝率 >= {entry_th.get('win_rate_min', 0):.0%}　"
+                f"DD中央値 >= {entry_th.get('dd_median_max', 0):+.2%}"
+            )
+        display_near = pd.DataFrame()
+        display_near["銘柄コード"] = near["ticker"].values
+        display_near["銘柄名"] = near["銘柄名"].values
+        display_near["期待リターン"] = near["weighted_median_return"].apply(lambda x: f"{x:+.3%}")
+        display_near["期待リターン判定"] = near["期待リターン判定"].values
+        display_near["勝率"] = near["weighted_win_rate"].apply(lambda x: f"{x:.1%}")
+        display_near["勝率判定"] = near["勝率判定"].values
+        display_near["DD中央値"] = near["weighted_dd_median"].apply(lambda x: f"{x:+.3%}")
+        display_near["DD判定"] = near["DD判定"].values
+        st.dataframe(display_near, use_container_width=True, hide_index=True)
+    elif len(log["steps"]) > 0 and log["steps"][-1][1] == 0:
+        # Ended before reaching entry criteria
+        last_step = log["steps"][-1][0]
+        st.info(f"「{last_step}」の時点で候補が0件のため、エントリー基準の判定は行われていません。")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -418,9 +606,9 @@ def main() -> None:
     ticker_master = _load_ticker_master_safe()
     config = load_config()
 
-    # Three tabs
-    tab_main, tab_detail, tab_portfolio = st.tabs(
-        ["📊 スクリーニング結果", "🔍 銘柄詳細", "💼 保有管理"]
+    # Four tabs
+    tab_main, tab_detail, tab_portfolio, tab_log = st.tabs(
+        ["📊 スクリーニング結果", "🔍 銘柄詳細", "💼 保有管理", "📋 解析ログ"]
     )
 
     with tab_main:
@@ -431,6 +619,9 @@ def main() -> None:
 
     with tab_portfolio:
         render_portfolio_tab(config, ticker_master, backtest, candidates)
+
+    with tab_log:
+        render_log_tab(features, backtest, config, ticker_master)
 
 
 if __name__ == "__main__":

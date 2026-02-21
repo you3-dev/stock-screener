@@ -26,7 +26,7 @@ Design documents are in `docs/` (Japanese). The canonical spec is `docs/01_requi
 3. **Backtest Engine** — Calculate n-day (n=1..20) open-to-open returns `R(n) = Open(n)/Open(0) - 1` with exponential decay weighting `weight = exp(-0.3 * years_elapsed)`; output weighted median return, weighted win rate, weighted max-DD median
 4. **Screening Engine** — Apply liquidity filters (volume >= 500K, turnover >= 500M JPY, price 800-6000 JPY), capital inflow conditions (turnover ratio >= 1.8x, 20-day high break, bullish candle, ATR >= 2%, 3-day return <= 12%), and exclusions (limit-up next day, gap >= +5%); rank by expected return
 5. **Streamlit UI** — Main screen (ranked candidates table sorted by expected return), detail page (return/win-rate charts by holding period, DD distribution), portfolio management tab (holding days, forced-exit countdown)
-6. **GitHub Actions** — Nightly data update + screening pipeline at 21:00 JST; pre-market gap check at 08:50 JST
+6. **GitHub Actions** — Nightly data update + screening pipeline at 21:00 JST; pre-market gap check at 08:50 JST. Pipeline outputs are uploaded to a GitHub Release (`data-latest` tag) via `gh release upload`. Streamlit Cloud downloads these at startup via `src/data/release_store.py`.
 
 ## Key Domain Rules
 
@@ -37,6 +37,7 @@ Design documents are in `docs/` (Japanese). The canonical spec is `docs/01_requi
 - Pre-market gap check: <= +3% OK, +3-5% caution, >= +5% exclude
 - Commissions and taxes are not modeled
 - All screening thresholds are externalized in `config/settings.yaml`
+- Data cache (Parquet files) is stored as GitHub Release assets (`data-latest` tag), not in the repository itself. `release_store.repo` and `release_store.tag` in `config/settings.yaml` control the download source.
 
 ## Development Commands
 

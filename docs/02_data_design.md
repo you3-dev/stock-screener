@@ -46,3 +46,20 @@
 -   win_rate
 -   recommended_hold_days
 -   dd_median
+
+## 6. データ保存方式
+
+### GitHub Release アセット
+
+パイプライン（GitHub Actions 夜間バッチ）で生成した Parquet ファイルは、GitHub Release（`data-latest` タグ）のアセットとしてアップロードする。
+
+-   保存先: `gh release upload data-latest <file> --clobber`
+-   対象ファイル: prices.parquet, features.parquet, backtest_results.parquet, ticker_master.parquet
+-   設定: `config/settings.yaml` の `release_store.repo` / `release_store.tag`
+
+### Streamlit Cloud からの取得
+
+Streamlit Community Cloud 起動時に `src/data/release_store.py` の `ensure_data_available()` を呼び出し、ローカルキャッシュ（`data_cache/`）にファイルがなければ GitHub Release API からダウンロードする。
+
+-   Git LFS は Streamlit Cloud 非対応のため不使用
+-   `data_cache/` は `.gitignore` に含めリポジトリにはコミットしない

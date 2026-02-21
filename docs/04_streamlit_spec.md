@@ -33,3 +33,13 @@
 
 -   GitHub Repository
 -   Streamlit Community Cloud
+
+## 4. データ取得方式
+
+Streamlit Community Cloud 上ではリポジトリに Parquet ファイルは含まれない（Git LFS 非対応）。
+
+起動時に `src/data/release_store.py` の `ensure_data_available()` を呼び出し、GitHub Release（`data-latest` タグ）からデータをダウンロードして `data_cache/` に保存する。
+
+-   GitHub Release API 経由で Parquet アセットを取得
+-   公開リポジトリの場合はトークン不要
+-   設定: `config/settings.yaml` の `release_store` セクション

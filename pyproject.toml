@@ -16,6 +16,9 @@ dependencies = [
     "xlrd>=2.0",
 ]
 
+[tool.poetry]
+packages = [{include = "src"}]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src", "src.*"]

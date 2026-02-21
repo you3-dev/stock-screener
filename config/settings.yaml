@@ -1,0 +1,45 @@
+# 株価期待値スクリーニングツール 設定ファイル
+
+# バックテストパラメータ
+backtest:
+  lookback_years: 5
+  decay_lambda: 0.3
+  max_hold_days: 20
+
+# 流動性フィルター
+liquidity:
+  min_volume: 500000
+  min_volume_validation: 100000  # 検証用下限
+  min_turnover: 500000000       # 5億円
+  price_min: 800
+  price_max: 6000
+
+# 資金流入検知条件
+capital_inflow:
+  turnover_ratio_5d_min: 1.8
+  high_20_break: true
+  bullish_candle: true
+  atr14_ratio_min: 0.02
+  recent_3day_return_max: 0.12
+
+# 除外条件
+exclusion:
+  limit_up_next_day: true
+  gap_up_threshold: 0.05
+
+# エントリー基準
+entry:
+  expected_return_1d_min: 0.0035
+  win_rate_min: 0.57
+  dd_median_max: -0.018
+
+# ポートフォリオルール
+portfolio:
+  max_holdings: 5
+  max_hold_days: 20
+  allocation: equal_weight
+
+# 寄り気配チェック閾値
+premarket_gap:
+  ok_max: 0.03
+  caution_max: 0.05

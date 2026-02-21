@@ -36,3 +36,30 @@ Design documents are in `docs/` (Japanese). The canonical spec is `docs/01_requi
 - Max holding period: 20 business days (forced exit)
 - Pre-market gap check: <= +3% OK, +3-5% caution, >= +5% exclude
 - Commissions and taxes are not modeled
+- All screening thresholds are externalized in `config/settings.yaml`
+
+## Development Commands
+
+```bash
+uv sync                  # Install dependencies
+uv run pytest            # Run all tests
+uv run pytest tests/test_foo.py::test_bar  # Run a single test
+uv run ruff check .      # Lint
+uv run ruff format .     # Format
+uv run streamlit run src/app/main.py  # Run the Streamlit app locally
+```
+
+## Project Structure
+
+```
+src/
+  data/       # Data acquisition & ticker master (Phase 1)
+  features/   # Feature engineering (Phase 2)
+  backtest/   # Backtest engine (Phase 3)
+  screening/  # Screening logic (Phase 4)
+  app/        # Streamlit UI (Phase 5)
+config/       # YAML settings (thresholds, parameters)
+tests/        # pytest tests
+scripts/      # GitHub Actions batch scripts (Phase 6)
+docs/         # Design documents (Japanese)
+```

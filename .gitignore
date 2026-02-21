@@ -19,7 +19,8 @@ uv.lock
 .DS_Store
 Thumbs.db
 
-# Data cache (local temp files only)
+# Data cache (downloaded from GitHub Releases at runtime)
+data_cache/
 *.pickle
 
 # Environment

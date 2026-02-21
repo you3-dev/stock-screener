@@ -15,6 +15,7 @@ from pathlib import Path
 from src.backtest.engine import load_backtest_results
 from src.data.config import load_config
 from src.data.price_downloader import update_prices
+from src.data.release_store import ensure_data_available
 from src.features.engineer import load_features
 from src.screening.screener import screen_candidates
 
@@ -37,6 +38,11 @@ def main() -> None:
     gap_cfg = cfg["premarket_gap"]
     ok_max = gap_cfg["ok_max"]
     caution_max = gap_cfg["caution_max"]
+
+    # 0. Download data from GitHub Release if not cached locally
+    if not ensure_data_available():
+        logger.error("Failed to obtain cached data. Run nightly pipeline first.")
+        sys.exit(1)
 
     # 1. Load previous screening candidates
     features = load_features()
@@ -98,9 +104,7 @@ def main() -> None:
     ok_count = sum(1 for r in results if r["status"] == "OK")
     caution_count = sum(1 for r in results if r["status"] == "注意")
     exclude_count = sum(1 for r in results if r["status"] == "除外推奨")
-    logger.info(
-        "Summary: OK=%d, Caution=%d, Exclude=%d", ok_count, caution_count, exclude_count
-    )
+    logger.info("Summary: OK=%d, Caution=%d, Exclude=%d", ok_count, caution_count, exclude_count)
 
     logger.info("=== Morning gap check completed ===")
 

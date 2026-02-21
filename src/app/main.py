@@ -67,8 +67,14 @@ def format_display_table(
     if candidates.empty:
         return pd.DataFrame(
             columns=[
-                "ランク", "銘柄コード", "銘柄名", "1日期待値",
-                "勝率", "推奨日数", "最大DD", "総合スコア",
+                "ランク",
+                "銘柄コード",
+                "銘柄名",
+                "1日期待値",
+                "勝率",
+                "推奨日数",
+                "最大DD",
+                "総合スコア",
             ]
         )
 
@@ -76,9 +82,7 @@ def format_display_table(
 
     # Join company name
     if ticker_master is not None and not ticker_master.empty:
-        df = df.merge(
-            ticker_master[["ticker", "company_name"]], on="ticker", how="left"
-        )
+        df = df.merge(ticker_master[["ticker", "company_name"]], on="ticker", how="left")
         df["company_name"] = df["company_name"].fillna("---")
     else:
         df["company_name"] = "---"
@@ -108,6 +112,9 @@ def format_display_table(
 @st.cache_data(ttl=3600)
 def _load_all_data():
     """Load cached features and backtest results, then run screening."""
+    from src.data.release_store import ensure_data_available
+
+    ensure_data_available()
     features = load_features()
     backtest = load_backtest_results()
     if features is None or backtest is None:
@@ -320,9 +327,7 @@ def render_portfolio_tab(
             with col2:
                 entry_date = st.date_input("エントリー日", value=date.today())
             with col3:
-                entry_price = st.number_input(
-                    "エントリー価格", min_value=0.0, value=0.0, step=1.0
-                )
+                entry_price = st.number_input("エントリー価格", min_value=0.0, value=0.0, step=1.0)
 
             submitted = st.form_submit_button("追加")
             if submitted and selected_str:
@@ -362,9 +367,7 @@ def render_portfolio_tab(
             status = "✅ 保有中"
 
         # Next-day expected return from backtest
-        bt_1d = backtest[
-            (backtest["ticker"] == holding["ticker"]) & (backtest["hold_days"] == 1)
-        ]
+        bt_1d = backtest[(backtest["ticker"] == holding["ticker"]) & (backtest["hold_days"] == 1)]
         next_day_ret = bt_1d["weighted_median_return"].iloc[0] if not bt_1d.empty else None
 
         col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 1, 1, 1])

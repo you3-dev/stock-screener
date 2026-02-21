@@ -43,3 +43,10 @@ portfolio:
 premarket_gap:
   ok_max: 0.03
   caution_max: 0.05
+
+# GitHub Release データストア
+# パイプラインで生成した parquet を Release アセットとして保存し、
+# Streamlit Cloud 起動時にダウンロードする。
+release_store:
+  repo: "you3-dev/stock-screener"
+  tag: "data-latest"

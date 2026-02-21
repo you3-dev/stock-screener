@@ -1,5 +1,11 @@
 """Streamlit UI for stock expected-value screening tool."""
 
+import sys
+from pathlib import Path
+
+# Add project root to sys.path for Streamlit Cloud compatibility
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
 import logging
 from datetime import date
 

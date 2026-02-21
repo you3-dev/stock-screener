@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=1.26",
     "streamlit>=1.30",
     "pyyaml>=6.0",
+    "xlrd>=2.0",
 ]
 
 [tool.uv]
@@ -26,3 +27,4 @@ select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: marks tests as slow (require network access)"]

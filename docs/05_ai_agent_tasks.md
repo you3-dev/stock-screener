@@ -23,11 +23,11 @@
 -   [x] 条件フィルタ実装
 -   [x] 期待値順ランキング
 
-## Phase5: Streamlit UI実装
+## Phase5: Streamlit UI実装 ✅ 完了
 
--   メイン画面
--   詳細画面
--   保有管理
+-   [x] メイン画面
+-   [x] 詳細画面
+-   [x] 保有管理
 
 ## Phase6: GitHub Actions設定
 

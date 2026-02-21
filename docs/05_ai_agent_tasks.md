@@ -29,7 +29,7 @@
 -   [x] 詳細画面
 -   [x] 保有管理
 
-## Phase6: GitHub Actions設定
+## Phase6: GitHub Actions設定 ✅ 完了
 
--   夜間バッチ
--   データ更新
+-   [x] 夜間バッチ
+-   [x] データ更新

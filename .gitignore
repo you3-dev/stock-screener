@@ -19,9 +19,7 @@ uv.lock
 .DS_Store
 Thumbs.db
 
-# Data cache
-data_cache/
-*.parquet
+# Data cache (local temp files only)
 *.pickle
 
 # Environment

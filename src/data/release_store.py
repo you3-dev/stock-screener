@@ -141,18 +141,36 @@ def download_release_data(target_dir: Path | None = None) -> bool:
     return all_ok
 
 
+def _is_valid_parquet(path: Path) -> bool:
+    """Check if a file is a valid Parquet file."""
+    try:
+        import pyarrow.parquet as pq
+
+        pq.read_schema(path)
+        return True
+    except Exception:
+        return False
+
+
 def ensure_data_available() -> bool:
     """Make sure all data parquet files exist locally.
 
-    If any file is missing, attempt to download from the GitHub Release.
+    If any file is missing or corrupted, attempt to download from the GitHub Release.
     Returns ``True`` when all required files are present after this call.
     """
-    missing = [f for f in _DATA_FILES if not (_CACHE_DIR / f).exists()]
+    invalid = []
+    for f in _DATA_FILES:
+        p = _CACHE_DIR / f
+        if not p.exists() or not _is_valid_parquet(p):
+            invalid.append(f)
+            if p.exists():
+                logger.warning("Corrupted file detected, will re-download: %s", f)
+                p.unlink()
 
-    if not missing:
+    if not invalid:
         return True
 
-    logger.info("Missing data files: %s — downloading from GitHub Release ...", missing)
+    logger.info("Missing/invalid data files: %s — downloading from GitHub Release ...", invalid)
     download_release_data()
 
     # Re-check

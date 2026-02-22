@@ -1,5 +1,7 @@
 """Streamlit UI for stock expected-value screening tool."""
 
+import hmac
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +16,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src.app.pipeline_trigger import (
+    fetch_workflow_runs,
+    format_run_status,
+    trigger_workflow,
+)
 from src.backtest.engine import load_backtest_results
 from src.data.config import load_config
 from src.data.ticker_master import load_ticker_master
@@ -437,21 +444,23 @@ def _build_screening_log(
 
     # Capital inflow breakdown (individual condition counts)
     log["inflow_breakdown"] = [
-        ("出来高倍率 >= {:.1f}".format(ci["turnover_ratio_5d_min"]),
-         int((df["turnover_ratio_5d"] >= ci["turnover_ratio_5d_min"]).sum()),
-         after_liquidity),
-        ("20日高値ブレイク",
-         int(df["high_20_break_flag"].sum()),
-         after_liquidity),
-        ("陽線 (close > open)",
-         int((df["close"] > df["open"]).sum()),
-         after_liquidity),
-        ("ATR比率 >= {:.0%}".format(ci["atr14_ratio_min"]),
-         int((df["atr14_ratio"] >= ci["atr14_ratio_min"]).sum()),
-         after_liquidity),
-        ("直近3日リターン <= {:.0%}".format(ci["recent_3day_return_max"]),
-         int((df["recent_3day_return"] <= ci["recent_3day_return_max"]).sum()),
-         after_liquidity),
+        (
+            "出来高倍率 >= {:.1f}".format(ci["turnover_ratio_5d_min"]),
+            int((df["turnover_ratio_5d"] >= ci["turnover_ratio_5d_min"]).sum()),
+            after_liquidity,
+        ),
+        ("20日高値ブレイク", int(df["high_20_break_flag"].sum()), after_liquidity),
+        ("陽線 (close > open)", int((df["close"] > df["open"]).sum()), after_liquidity),
+        (
+            "ATR比率 >= {:.0%}".format(ci["atr14_ratio_min"]),
+            int((df["atr14_ratio"] >= ci["atr14_ratio_min"]).sum()),
+            after_liquidity,
+        ),
+        (
+            "直近3日リターン <= {:.0%}".format(ci["recent_3day_return_max"]),
+            int((df["recent_3day_return"] <= ci["recent_3day_return_max"]).sum()),
+            after_liquidity,
+        ),
     ]
 
     df = df[
@@ -536,11 +545,13 @@ def render_log_tab(
     for i, (step_name, count) in enumerate(log["steps"]):
         prev = log["steps"][i - 1][1] if i > 0 else count
         drop = prev - count if i > 0 else 0
-        funnel_data.append({
-            "ステップ": step_name,
-            "残存銘柄数": count,
-            "除外数": f"-{drop}" if drop > 0 else "—",
-        })
+        funnel_data.append(
+            {
+                "ステップ": step_name,
+                "残存銘柄数": count,
+                "除外数": f"-{drop}" if drop > 0 else "—",
+            }
+        )
     st.table(pd.DataFrame(funnel_data))
 
     # Capital inflow breakdown
@@ -548,11 +559,13 @@ def render_log_tab(
         st.subheader("資金流入条件（個別通過数）")
         breakdown_data = []
         for cond_name, passed, total in log["inflow_breakdown"]:
-            breakdown_data.append({
-                "条件": cond_name,
-                "通過数": f"{passed} / {total}",
-                "通過率": f"{passed / total * 100:.1f}%" if total > 0 else "—",
-            })
+            breakdown_data.append(
+                {
+                    "条件": cond_name,
+                    "通過数": f"{passed} / {total}",
+                    "通過率": f"{passed / total * 100:.1f}%" if total > 0 else "—",
+                }
+            )
         st.table(pd.DataFrame(breakdown_data))
 
     # Near-miss details
@@ -583,6 +596,95 @@ def render_log_tab(
 
 
 # ---------------------------------------------------------------------------
+# Tab 5: Pipeline trigger
+# ---------------------------------------------------------------------------
+
+
+def _get_secret(section: str, key: str) -> str:
+    """Get a secret from Streamlit secrets or environment variable."""
+    try:
+        return st.secrets[section][key]
+    except (KeyError, FileNotFoundError, AttributeError):
+        env_key = f"{section.upper()}_{key.upper()}"
+        return os.environ.get(env_key, "")
+
+
+def render_pipeline_tab() -> None:
+    """Render the pipeline trigger tab with password authentication."""
+    admin_password = _get_secret("pipeline", "admin_password")
+    github_pat = _get_secret("pipeline", "github_pat")
+
+    if not admin_password or not github_pat:
+        st.warning("パイプライン実行には Streamlit Secrets の設定が必要です。")
+        st.code(
+            "# .streamlit/secrets.toml\n"
+            "[pipeline]\n"
+            'admin_password = "your-password"\n'
+            'github_pat = "ghp_xxxxx"  # actions:write 権限が必要',
+            language="toml",
+        )
+        return
+
+    # Password authentication
+    password = st.text_input("管理パスワード", type="password", key="pipeline_password")
+    if not password:
+        st.info("パイプラインを実行するにはパスワードを入力してください。")
+        return
+
+    if not hmac.compare_digest(password, admin_password):
+        st.error("パスワードが正しくありません。")
+        return
+
+    st.success("認証OK")
+
+    # Workflow trigger buttons
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("夜間パイプライン")
+        st.caption("データ取得 → 特徴量 → バックテスト → スクリーニング")
+        if st.button("実行", key="trigger_nightly"):
+            with st.spinner("トリガー中..."):
+                result = trigger_workflow("nightly.yml", github_pat)
+            if result["success"]:
+                st.success(result["message"])
+            else:
+                st.error(result["message"])
+
+    with col2:
+        st.subheader("朝チェック")
+        st.caption("ギャップチェック → 除外判定")
+        if st.button("実行", key="trigger_morning"):
+            with st.spinner("トリガー中..."):
+                result = trigger_workflow("morning_check.yml", github_pat)
+            if result["success"]:
+                st.success(result["message"])
+            else:
+                st.error(result["message"])
+
+    # Data refresh button
+    st.divider()
+    if st.button("データ再取得", key="refresh_data"):
+        _load_all_data.clear()
+        st.rerun()
+
+    # Recent runs
+    st.subheader("最近の実行履歴")
+    hist_nightly, hist_morning = st.tabs(["夜間パイプライン", "朝チェック"])
+
+    for hist_tab, wf_file in [(hist_nightly, "nightly.yml"), (hist_morning, "morning_check.yml")]:
+        with hist_tab:
+            runs = fetch_workflow_runs(wf_file, github_pat)
+            if runs:
+                for run in runs:
+                    icon, label = format_run_status(run)
+                    created = run["created_at"][:16].replace("T", " ")
+                    st.write(f"{icon} {created} — {label}")
+            else:
+                st.info("実行履歴はありません。")
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -598,30 +700,38 @@ def main() -> None:
 
     # Load data
     features, backtest, candidates = _load_all_data()
-    if features is None:
-        st.error("データキャッシュが見つかりません。先にパイプラインを実行してください。")
-        st.code("uv run python scripts/run_pipeline.py", language="bash")
-        return
 
-    ticker_master = _load_ticker_master_safe()
-    config = load_config()
-
-    # Four tabs
-    tab_main, tab_detail, tab_portfolio, tab_log = st.tabs(
-        ["📊 スクリーニング結果", "🔍 銘柄詳細", "💼 保有管理", "📋 解析ログ"]
+    # Five tabs — pipeline tab is always accessible
+    tab_main, tab_detail, tab_portfolio, tab_log, tab_pipeline = st.tabs(
+        ["📊 スクリーニング結果", "🔍 銘柄詳細", "💼 保有管理", "📋 解析ログ", "⚙️ パイプライン実行"]
     )
 
-    with tab_main:
-        render_main_tab(candidates, ticker_master, backtest)
+    if features is None:
+        with tab_main:
+            st.error(
+                "データキャッシュが見つかりません。"
+                "「パイプライン実行」タブからパイプラインを実行するか、"
+                "以下のコマンドを実行してください。"
+            )
+            st.code("uv run python scripts/run_pipeline.py", language="bash")
+    else:
+        ticker_master = _load_ticker_master_safe()
+        config = load_config()
 
-    with tab_detail:
-        render_detail_tab(backtest, ticker_master, candidates)
+        with tab_main:
+            render_main_tab(candidates, ticker_master, backtest)
 
-    with tab_portfolio:
-        render_portfolio_tab(config, ticker_master, backtest, candidates)
+        with tab_detail:
+            render_detail_tab(backtest, ticker_master, candidates)
 
-    with tab_log:
-        render_log_tab(features, backtest, config, ticker_master)
+        with tab_portfolio:
+            render_portfolio_tab(config, ticker_master, backtest, candidates)
+
+        with tab_log:
+            render_log_tab(features, backtest, config, ticker_master)
+
+    with tab_pipeline:
+        render_pipeline_tab()
 
 
 if __name__ == "__main__":

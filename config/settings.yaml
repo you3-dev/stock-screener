@@ -8,10 +8,10 @@ backtest:
 
 # 流動性フィルター
 liquidity:
-  min_volume: 500000
+  min_volume: 200000
   min_volume_validation: 100000  # 検証用下限
-  min_turnover: 500000000       # 5億円
-  price_min: 800
+  min_turnover: 200000000       # 2億円
+  price_min: 200
   price_max: 6000
 
 # 資金流入検知条件

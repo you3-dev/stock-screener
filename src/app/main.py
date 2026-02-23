@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import altair as alt
 import numpy as np
@@ -678,7 +678,9 @@ def render_pipeline_tab() -> None:
             if runs:
                 for run in runs:
                     icon, label = format_run_status(run)
-                    created = run["created_at"][:16].replace("T", " ")
+                    utc = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
+                    jst = utc.astimezone(timezone(timedelta(hours=9)))
+                    created = jst.strftime("%Y-%m-%d %H:%M")
                     st.write(f"{icon} {created} — {label}")
             else:
                 st.info("実行履歴はありません。")

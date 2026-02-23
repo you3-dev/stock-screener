@@ -23,5 +23,8 @@ Thumbs.db
 data_cache/
 *.pickle
 
+# Streamlit secrets (contains passwords and tokens)
+.streamlit/secrets.toml
+
 # Environment
 .env

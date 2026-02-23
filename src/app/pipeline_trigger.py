@@ -16,7 +16,7 @@ def _get_repo() -> str:
     return cfg.get("release_store", {}).get("repo", "")
 
 
-def trigger_workflow(workflow_file: str, token: str, ref: str = "main") -> dict[str, object]:
+def trigger_workflow(workflow_file: str, token: str, ref: str = "master") -> dict[str, object]:
     """Trigger a GitHub Actions workflow via workflow_dispatch.
 
     Returns dict with ``success`` (bool) and ``message`` (str).

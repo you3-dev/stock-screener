@@ -152,12 +152,22 @@ def _is_valid_parquet(path: Path) -> bool:
         return False
 
 
-def ensure_data_available() -> bool:
+def ensure_data_available(force_refresh: bool = False) -> bool:
     """Make sure all data parquet files exist locally.
 
     If any file is missing or corrupted, attempt to download from the GitHub Release.
+    When *force_refresh* is ``True``, always re-download regardless of local state.
     Returns ``True`` when all required files are present after this call.
     """
+    if force_refresh:
+        logger.info("Force refresh requested — downloading all data from GitHub Release ...")
+        download_release_data()
+        still_missing = [f for f in _DATA_FILES if not (_CACHE_DIR / f).exists()]
+        if still_missing:
+            logger.error("Still missing after download: %s", still_missing)
+            return False
+        return True
+
     invalid = []
     for f in _DATA_FILES:
         p = _CACHE_DIR / f

@@ -85,7 +85,7 @@ def download_prices(
         cfg = load_config()
         years = cfg["backtest"]["lookback_years"]
 
-    end = datetime.now()
+    end = datetime.now() + timedelta(days=1)
     start = end - timedelta(days=years * 365)
     start_str = start.strftime("%Y-%m-%d")
     end_str = end.strftime("%Y-%m-%d")
@@ -136,7 +136,7 @@ def update_prices(tickers: list[str], recent_days: int = 10) -> pd.DataFrame:
     """
     existing = load_prices()
 
-    end = datetime.now()
+    end = datetime.now() + timedelta(days=1)
     start = end - timedelta(days=recent_days)
     start_str = start.strftime("%Y-%m-%d")
     end_str = end.strftime("%Y-%m-%d")

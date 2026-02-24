@@ -665,6 +665,10 @@ def render_pipeline_tab() -> None:
     # Data refresh button
     st.divider()
     if st.button("データ再取得", key="refresh_data"):
+        from src.data.release_store import ensure_data_available
+
+        with st.spinner("GitHub Release からデータをダウンロード中..."):
+            ensure_data_available(force_refresh=True)
         _load_all_data.clear()
         st.rerun()
 

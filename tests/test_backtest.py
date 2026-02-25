@@ -8,6 +8,7 @@ import pandas as pd
 from src.backtest.engine import (
     _add_forward_returns,
     _add_max_drawdown,
+    _compute_signal_mask,
     _compute_weights,
     run_backtest,
     weighted_median,
@@ -196,4 +197,95 @@ class TestRunBacktest:
     def test_sample_size_positive(self):
         df = _make_price_df(n_days=30, ticker="0001.T")
         result = run_backtest(df)
+        assert (result["sample_size"] > 0).all()
+
+
+def _make_features_for_prices(
+    prices: pd.DataFrame,
+    *,
+    signal_dates: list[str] | None = None,
+) -> pd.DataFrame:
+    """Create a synthetic features DataFrame aligned to a prices DataFrame.
+
+    If *signal_dates* is given, only those dates will satisfy the capital
+    inflow conditions.  All other dates get values that fail at least one
+    condition.
+    """
+    df = prices.copy()
+    if signal_dates is not None:
+        signal_set = {pd.Timestamp(d) for d in signal_dates}
+        is_signal = df["date"].isin(signal_set)
+    else:
+        # All rows are signal days by default
+        is_signal = pd.Series(True, index=df.index)
+
+    # Values that pass all conditions
+    df["turnover_ratio_5d"] = np.where(is_signal, 2.0, 1.0)
+    df["high_20_break_flag"] = is_signal
+    # Ensure bullish candle on signal days, bearish otherwise
+    df["close"] = np.where(is_signal, df["open"] + 10, df["open"] - 10)
+    df["atr14_ratio"] = np.where(is_signal, 0.03, 0.01)
+    df["recent_3day_return"] = np.where(is_signal, 0.05, 0.05)
+    df["liquidity_flag"] = True
+
+    return df
+
+
+class TestComputeSignalMask:
+    def test_all_signal(self):
+        prices = _make_price_df(n_days=10)
+        features = _make_features_for_prices(prices)
+        mask = _compute_signal_mask(features)
+        assert mask.all()
+
+    def test_no_signal(self):
+        prices = _make_price_df(n_days=10)
+        features = _make_features_for_prices(prices, signal_dates=[])
+        mask = _compute_signal_mask(features)
+        assert not mask.any()
+
+    def test_partial_signal(self):
+        prices = _make_price_df(n_days=10)
+        signal_dates = [str(prices["date"].iloc[0].date())]
+        features = _make_features_for_prices(prices, signal_dates=signal_dates)
+        mask = _compute_signal_mask(features)
+        assert mask.sum() == 1
+
+
+class TestConditionalBacktest:
+    def test_conditional_output_schema(self):
+        prices = _make_price_df(n_days=50, ticker="0001.T")
+        features = _make_features_for_prices(prices)
+        result = run_backtest(prices, features)
+        expected_cols = {
+            "ticker", "hold_days", "weighted_median_return",
+            "weighted_win_rate", "weighted_dd_median", "sample_size",
+        }
+        assert set(result.columns) == expected_cols
+
+    def test_conditional_reduces_sample_size(self):
+        prices = _make_price_df(n_days=50, ticker="0001.T")
+        # Unconditional
+        result_all = run_backtest(prices)
+        # Conditional with only a few signal days
+        signal_dates = [str(d.date()) for d in prices["date"].iloc[:5]]
+        features = _make_features_for_prices(prices, signal_dates=signal_dates)
+        result_cond = run_backtest(prices, features)
+
+        s_all = result_all[result_all["hold_days"] == 1]["sample_size"].iloc[0]
+        s_cond = result_cond[result_cond["hold_days"] == 1]["sample_size"].iloc[0]
+        assert s_cond < s_all
+        assert s_cond <= 5
+
+    def test_no_signal_returns_empty(self):
+        prices = _make_price_df(n_days=30, ticker="0001.T")
+        features = _make_features_for_prices(prices, signal_dates=[])
+        result = run_backtest(prices, features)
+        assert len(result) == 0
+
+    def test_without_features_unchanged(self):
+        """Calling without features behaves like the original unconditional backtest."""
+        prices = _make_price_df(n_days=30, ticker="0001.T")
+        result = run_backtest(prices)
+        assert len(result) > 0
         assert (result["sample_size"] > 0).all()

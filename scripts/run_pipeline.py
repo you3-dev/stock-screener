@@ -43,9 +43,9 @@ def main() -> None:
     save_features(features)
     logger.info("Features: %d rows", len(features))
 
-    # 4. Backtest
+    # 4. Backtest (conditional on capital-inflow signal days)
     logger.info("Step 4/6: Running backtest...")
-    backtest = run_backtest(prices)
+    backtest = run_backtest(prices, features)
     save_backtest_results(backtest)
     logger.info("Backtest: %d results", len(backtest))
 

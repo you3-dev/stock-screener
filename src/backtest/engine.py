@@ -2,6 +2,9 @@
 
 Computes n-day forward open-to-open returns and drawdowns,
 then produces weighted statistics using exponential decay.
+
+When *features* are provided, statistics are conditioned on capital-inflow
+signal days only (conditional backtest).
 """
 
 import logging
@@ -90,14 +93,55 @@ def _compute_weights(
     return np.exp(-decay_lambda * years_elapsed.values)
 
 
-def run_backtest(prices: pd.DataFrame) -> pd.DataFrame:
+def _compute_signal_mask(features: pd.DataFrame) -> pd.Series:
+    """Compute boolean mask for capital-inflow signal days.
+
+    Uses the same liquidity + capital inflow + exclusion conditions
+    as the screening engine, so the backtest statistics are conditioned
+    on the same pattern that triggers entry candidates.
+    """
+    cfg = load_config()
+    ci = cfg["capital_inflow"]
+    exclusion = cfg["exclusion"]
+
+    mask = (
+        features["liquidity_flag"]
+        & (features["turnover_ratio_5d"] >= ci["turnover_ratio_5d_min"])
+        & (features["high_20_break_flag"])
+        & (features["close"] > features["open"])  # bullish candle
+        & (features["atr14_ratio"] >= ci["atr14_ratio_min"])
+        & (features["recent_3day_return"] <= ci["recent_3day_return_max"])
+    )
+
+    if exclusion.get("limit_up_next_day", False):
+        mask = mask & (
+            ((features["close"] - features["open"]) / features["open"]) < 0.15
+        )
+
+    return mask
+
+
+def run_backtest(
+    prices: pd.DataFrame,
+    features: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Run backtest on price data.
 
-    For each ticker, computes forward returns and max drawdowns for n=1..max_hold_days,
-    then produces weighted statistics using exponential decay.
+    For each ticker, computes forward returns and max drawdowns for
+    n=1..max_hold_days, then produces weighted statistics using
+    exponential decay.
+
+    When *features* is provided the statistics are **conditional**:
+    only days where the capital-inflow signal fired are included in
+    the aggregation.  This answers "when this pattern occurred in the
+    past, what was the forward return?" rather than computing
+    unconditional per-ticker averages.
 
     Args:
-        prices: DataFrame with columns date, ticker, open, high, low, close, volume, turnover.
+        prices: DataFrame with columns date, ticker, open, high, low,
+            close, volume, turnover.
+        features: Optional DataFrame from compute_features().  When
+            given, enables conditional backtest.
 
     Returns:
         DataFrame with columns:
@@ -121,23 +165,48 @@ def run_backtest(prices: pd.DataFrame) -> pd.DataFrame:
         parts.append(g)
     enriched = pd.concat(parts, ignore_index=True)
 
+    # Conditional backtest: mark signal days
+    if features is not None:
+        signal_mask = _compute_signal_mask(features)
+        signal_days = features.loc[signal_mask, ["ticker", "date"]].copy()
+        signal_days["_signal"] = True
+        enriched = enriched.merge(
+            signal_days[["ticker", "date", "_signal"]],
+            on=["ticker", "date"],
+            how="left",
+        )
+        enriched["_signal"] = enriched["_signal"].astype("boolean").fillna(False).astype(bool)
+        n_signal = int(enriched["_signal"].sum())
+        logger.info(
+            "Conditional backtest: %d signal days out of %d total rows",
+            n_signal,
+            len(enriched),
+        )
+    else:
+        enriched["_signal"] = True
+
     # Compute weights
     weights = _compute_weights(enriched["date"], reference_date, decay_lambda)
 
     # Aggregate statistics per ticker per hold_days
     results = []
     for ticker, tgroup in enriched.groupby("ticker", sort=False):
-        tw = weights[tgroup.index]
+        # Filter to signal days only
+        signal_rows = tgroup[tgroup["_signal"]]
+        if len(signal_rows) == 0:
+            continue
+
+        tw = weights[signal_rows.index]
         for n in range(1, max_n + 1):
             ret_col = f"return_{n}"
             dd_col = f"dd_{n}"
 
-            valid_mask = tgroup[ret_col].notna() & tgroup[dd_col].notna()
+            valid_mask = signal_rows[ret_col].notna() & signal_rows[dd_col].notna()
             if valid_mask.sum() == 0:
                 continue
 
-            ret_vals = tgroup.loc[valid_mask, ret_col].values
-            dd_vals = tgroup.loc[valid_mask, dd_col].values
+            ret_vals = signal_rows.loc[valid_mask, ret_col].values
+            dd_vals = signal_rows.loc[valid_mask, dd_col].values
             w = tw[valid_mask.values]
 
             w_median_ret = weighted_median(ret_vals, w)

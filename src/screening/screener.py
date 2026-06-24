@@ -136,3 +136,55 @@ def _empty_result() -> pd.DataFrame:
         columns=["date", "ticker", "expected_return_1d", "win_rate",
                  "recommended_hold_days", "dd_median"]
     )
+
+
+def screen_candidates_v2(
+    features: pd.DataFrame,
+    events: pd.DataFrame | None = None,
+    target_date=None,
+    window_days: int = 60,
+) -> pd.DataFrame:
+    """Layer-A-demoted screening (integration design docs/06-10).
+
+    Re-validation (docs/07-09) showed the per-ticker in-sample expected-return
+    ranking is an artifact, so this version drops the +0.35% EV cutoff and the
+    backtest join entirely.  It returns today's capital-inflow pattern matches
+    as a **reference watchlist**, annotated with the avoidance overlay (layer B):
+    a ``red_flag`` column for recent toxic financing, with Tier-A names sorted
+    last.  Ranking is by turnover ratio (a strength proxy, NOT validated alpha).
+
+    Columns: date, ticker, turnover_ratio_5d, atr14_ratio, recent_3day_return,
+    red_flag, flag_subtype, flag_date.
+    """
+    from src.overlay.avoidance import annotate
+
+    cfg = load_config()
+    ci = cfg["capital_inflow"]
+    exclusion = cfg["exclusion"]
+
+    if target_date is None:
+        target_date = features["date"].max()
+    else:
+        target_date = pd.Timestamp(target_date)
+
+    df = features[features["date"] == target_date].copy()
+    df = df[df["liquidity_flag"]]
+    df = df[
+        (df["turnover_ratio_5d"] >= ci["turnover_ratio_5d_min"])
+        & (df["high_20_break_flag"])
+        & (df["close"] > df["open"])
+        & (df["atr14_ratio"] >= ci["atr14_ratio_min"])
+        & (df["recent_3day_return"] <= ci["recent_3day_return_max"])
+    ].copy()
+    if exclusion.get("limit_up_next_day", False):
+        df = df[((df["close"] - df["open"]) / df["open"]) < 0.15].copy()
+
+    cols = ["date", "ticker", "turnover_ratio_5d", "atr14_ratio", "recent_3day_return"]
+    if df.empty:
+        return pd.DataFrame(columns=cols + ["red_flag", "flag_subtype", "flag_date"])
+
+    out = df[cols].copy()
+    out = annotate(out, events, window_days=window_days, date_col="date")
+    # Tier-A red-flagged names sorted last; within group, strongest turnover first
+    out = out.sort_values(["red_flag", "turnover_ratio_5d"], ascending=[True, False])
+    return out.reset_index(drop=True)

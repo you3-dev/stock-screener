@@ -33,6 +33,13 @@ entry:
   win_rate_min: 0.57
   dd_median_max: -0.018
 
+# 取引コスト(片側 bps)。正直なBT(honest.py)が往復で控除する。
+# 寄り成り入りの逆選択を見込み保守的に。手数料0でもスプレッド+スリッページは残る。
+costs:
+  commission_bps: 0.0
+  spread_bps: 7.5
+  slippage_bps: 7.5
+
 # ポートフォリオルール
 portfolio:
   max_holdings: 5

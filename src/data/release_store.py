@@ -17,11 +17,14 @@ logger = logging.getLogger(__name__)
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data_cache"
 
+# docs/07: the per-ticker backtest cache is invalid and no longer generated.
+# Layer B/C caches (financing_events, macro) are synced instead.
 _DATA_FILES = [
     "prices.parquet",
     "features.parquet",
-    "backtest_results.parquet",
     "ticker_master.parquet",
+    "financing_events.parquet",
+    "macro.parquet",
 ]
 
 

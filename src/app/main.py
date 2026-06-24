@@ -25,7 +25,9 @@ from src.backtest.engine import load_backtest_results
 from src.data.config import load_config
 from src.data.ticker_master import load_ticker_master
 from src.features.engineer import load_features
-from src.screening.screener import screen_candidates
+from src.ingest.financing_events import load_events
+from src.overlay.integration import current_regime
+from src.screening.screener import screen_candidates_v2
 
 logger = logging.getLogger(__name__)
 
@@ -67,48 +69,15 @@ def compute_remaining_days(hold_days: int, max_hold_days: int) -> int:
     return max_hold_days - hold_days
 
 
-def format_display_table(
-    candidates: pd.DataFrame, ticker_master: pd.DataFrame | None
-) -> pd.DataFrame:
-    """Build display table by joining company names and adding rank."""
-    if candidates.empty:
-        return pd.DataFrame(
-            columns=[
-                "ランク",
-                "銘柄コード",
-                "銘柄名",
-                "1日期待値",
-                "勝率",
-                "推奨日数",
-                "最大DD",
-                "総合スコア",
-            ]
-        )
-
-    df = candidates.copy()
-
-    # Join company name
+def _with_names(df: pd.DataFrame, ticker_master: pd.DataFrame | None) -> pd.DataFrame:
+    """Join company names (company_name col, '---' when unknown)."""
+    out = df.copy()
     if ticker_master is not None and not ticker_master.empty:
-        df = df.merge(ticker_master[["ticker", "company_name"]], on="ticker", how="left")
-        df["company_name"] = df["company_name"].fillna("---")
+        out = out.merge(ticker_master[["ticker", "company_name"]], on="ticker", how="left")
+        out["company_name"] = out["company_name"].fillna("---")
     else:
-        df["company_name"] = "---"
-
-    # Compute total score
-    df["total_score"] = compute_total_score(df)
-
-    # Build display table
-    display = pd.DataFrame()
-    display["ランク"] = range(1, len(df) + 1)
-    display["銘柄コード"] = df["ticker"].values
-    display["銘柄名"] = df["company_name"].values
-    display["1日期待値"] = df["expected_return_1d"].values
-    display["勝率"] = df["win_rate"].values
-    display["推奨日数"] = df["recommended_hold_days"].astype(int).values
-    display["最大DD"] = df["dd_median"].values
-    display["総合スコア"] = df["total_score"].values
-
-    return display
+        out["company_name"] = "---"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -118,15 +87,24 @@ def format_display_table(
 
 @st.cache_data(ttl=3600)
 def _load_all_data():
-    """Load cached features and backtest results, then run screening."""
-    from src.data.release_store import ensure_data_available
+    """Load cached features, run layer-A-demoted screening with overlays.
 
-    ensure_data_available()
+    docs/07-10: the per-ticker EV ranking is invalid, so candidates come from
+    ``screen_candidates_v2`` (pattern watchlist + avoidance overlay).  The old
+    backtest cache is loaded only for the legacy detail/portfolio tabs and may
+    be absent.
+    """
+    try:
+        from src.data.release_store import ensure_data_available
+        ensure_data_available()
+    except Exception:
+        logger.warning("release data fetch skipped", exc_info=True)
     features = load_features()
-    backtest = load_backtest_results()
-    if features is None or backtest is None:
+    if features is None:
         return None, None, None
-    candidates = screen_candidates(features, backtest)
+    events = load_events()
+    candidates = screen_candidates_v2(features, events)
+    backtest = load_backtest_results()  # optional (legacy tabs)
     return features, backtest, candidates
 
 
@@ -147,42 +125,58 @@ def _load_ticker_master_safe() -> pd.DataFrame | None:
 def render_main_tab(
     candidates: pd.DataFrame,
     ticker_master: pd.DataFrame | None,
-    backtest: pd.DataFrame,
+    backtest: pd.DataFrame | None,
 ) -> None:
-    """Render the main screening results tab."""
+    """Render the main tab: reference watchlist + avoidance red flags (docs/07-10)."""
+    st.info(
+        "**このツールは「当てる」ものではなく「負けにくくする」もの**です。再検証(docs/07-09)で"
+        "テクニカル期待値(旧+0.35%基準)は無効と判明したため、下表は**買い推奨ではなく観察用の"
+        "ウォッチリスト**です。価値は ①毒性ファイナンスの**回避**(🚩) と ②地合いに応じた**リスク管理**(上部バナー) にあります。"
+    )
     if candidates.empty:
-        st.info("本日のスクリーニング候補はありません。")
+        st.warning("本日、資金流入パターンに一致する銘柄はありません。")
         return
 
-    # Show screening date
-    screen_date = candidates["date"].iloc[0]
+    screen_date = pd.Timestamp(candidates["date"].iloc[0])
     st.caption(f"スクリーニング日: {screen_date.strftime('%Y-%m-%d')}")
 
-    # Build display table
-    display = format_display_table(candidates, ticker_master)
+    flagged = candidates[candidates["red_flag"]] if "red_flag" in candidates else candidates.iloc[0:0]
+    watch = candidates[~candidates["red_flag"]] if "red_flag" in candidates else candidates
 
-    # DD warning
-    dd_warnings = candidates[candidates["dd_median"] < -0.03]
-    if not dd_warnings.empty:
-        tickers = ", ".join(dd_warnings["ticker"].tolist())
-        st.warning(f"DD が -3% を超える銘柄があります: {tickers}")
+    # --- avoidance red flags (layer B) ---
+    if not flagged.empty:
+        st.subheader("🚩 回避(毒性ファイナンス発表後・候補から除外)")
+        st.caption(
+            "行使価額修正条項付新株予約権/MSCB 発表から60日以内。検証08-09で中立後 +20日 -5%/+60日 -8%・"
+            "45%が10%超下落。**買わない**。"
+        )
+        fdf = _with_names(flagged, ticker_master)
+        ftab = pd.DataFrame({
+            "銘柄コード": fdf["ticker"].values,
+            "銘柄名": fdf["company_name"].values,
+            "種別": fdf["flag_subtype"].values,
+            "発表日": pd.to_datetime(fdf["flag_date"]).dt.strftime("%Y-%m-%d").values,
+        })
+        st.dataframe(ftab, use_container_width=True, hide_index=True)
 
-    # Format percentages for display
-    styled = display.copy()
-    styled["1日期待値"] = styled["1日期待値"].apply(lambda x: f"{x:+.2%}")
-    styled["勝率"] = styled["勝率"].apply(lambda x: f"{x:.1%}")
-    styled["最大DD"] = styled["最大DD"].apply(lambda x: f"{x:+.2%}")
+    # --- reference watchlist (layer A demoted) ---
+    st.subheader("資金流入パターン一致(参考ウォッチリスト)")
+    st.caption("出来高急増+20日高値+陽線+ATR。出来高倍率順。※小型では「ブレイク後は追わない」警告として読む(検証09)。")
+    wdf = _with_names(watch, ticker_master)
+    wtab = pd.DataFrame({
+        "銘柄コード": wdf["ticker"].values,
+        "銘柄名": wdf["company_name"].values,
+        "出来高倍率": wdf["turnover_ratio_5d"].round(2).values,
+        "ATR比率": (wdf["atr14_ratio"] * 100).round(1).astype(str) + "%",
+        "直近3日": (wdf["recent_3day_return"] * 100).round(1).astype(str) + "%",
+    })
+    st.dataframe(wtab, use_container_width=True, hide_index=True)
 
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    # Ticker selection for detail tab
-    st.subheader("銘柄選択")
-    options = []
-    for _, row in display.iterrows():
-        options.append(f"{row['銘柄コード']} - {row['銘柄名']}")
-
+    # Ticker selection for legacy detail tab
+    options = [f"{r['ticker']} - {n}" for r, n in
+               zip(wdf.to_dict("records"), wdf["company_name"])]
     if options:
-        selected = st.selectbox("詳細を表示する銘柄を選択:", options)
+        selected = st.selectbox("詳細(レガシー)を表示する銘柄:", options)
         if selected:
             st.session_state["selected_ticker"] = selected.split(" - ")[0]
 
@@ -221,7 +215,7 @@ def render_detail_tab(
     # Get recommended hold days from candidates
     cand_row = candidates[candidates["ticker"] == selected]
     recommended_n = None
-    if not cand_row.empty:
+    if not cand_row.empty and "recommended_hold_days" in cand_row.columns:
         recommended_n = int(cand_row["recommended_hold_days"].iloc[0])
 
     # Sample size metric
@@ -702,23 +696,31 @@ def main() -> None:
         page_icon="📈",
         layout="wide",
     )
-    st.title("株価期待値スクリーニングツール")
+    st.title("小型株 回避・リスク管理スクリーナー")
 
     # Load data
     features, backtest, candidates = _load_all_data()
+
+    # --- regime banner (layer C, docs/10) — always visible above tabs ---
+    reg = current_regime()
+    factor = f"推奨サイズ係数 ×{reg['size_factor']:.1f}"
+    if reg["risk_off"]:
+        st.error(f"🔴 地合い: {reg['label']}(GSPC<50日線・{reg['asof']})｜{factor}｜"
+                 f"**新規スイングは抑制/縮小**(検証10: リスクオフ回避で最大DDを約1/3に圧縮)")
+    else:
+        st.success(f"🟢 地合い: {reg['label']}（{reg['asof']}）｜{factor}")
 
     # Five tabs — pipeline tab is always accessible
     tab_main, tab_detail, tab_portfolio, tab_log, tab_pipeline = st.tabs(
         ["📊 スクリーニング結果", "🔍 銘柄詳細", "💼 保有管理", "📋 解析ログ", "⚙️ パイプライン実行"]
     )
 
+    _LEGACY = ("旧「期待値」ベースのタブです。再検証(docs/07-09)でテクニカル期待値は無効と判明したため"
+               "無効化しています。価値は『スクリーニング結果』タブの回避(🚩)と上部の地合いバナーにあります。")
+
     if features is None:
         with tab_main:
-            st.error(
-                "データキャッシュが見つかりません。"
-                "「パイプライン実行」タブからパイプラインを実行するか、"
-                "以下のコマンドを実行してください。"
-            )
+            st.error("データキャッシュが見つかりません。以下を実行してください。")
             st.code("uv run python scripts/run_pipeline.py", language="bash")
     else:
         ticker_master = _load_ticker_master_safe()
@@ -728,13 +730,22 @@ def main() -> None:
             render_main_tab(candidates, ticker_master, backtest)
 
         with tab_detail:
-            render_detail_tab(backtest, ticker_master, candidates)
+            if backtest is not None:
+                render_detail_tab(backtest, ticker_master, candidates)
+            else:
+                st.info(_LEGACY)
 
         with tab_portfolio:
-            render_portfolio_tab(config, ticker_master, backtest, candidates)
+            if backtest is not None:
+                render_portfolio_tab(config, ticker_master, backtest, candidates)
+            else:
+                st.info(_LEGACY)
 
         with tab_log:
-            render_log_tab(features, backtest, config, ticker_master)
+            if backtest is not None:
+                render_log_tab(features, backtest, config, ticker_master)
+            else:
+                st.info(_LEGACY)
 
     with tab_pipeline:
         render_pipeline_tab()

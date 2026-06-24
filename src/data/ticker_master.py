@@ -20,8 +20,17 @@ _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data_cache"
 _CACHE_FILE = _CACHE_DIR / "ticker_master.parquet"
 
 
-def fetch_prime_tickers() -> pd.DataFrame:
-    """Download JPX listed companies XLS and return Prime market tickers.
+# JPX市場区分(部分一致)→ 正規化ラベル
+_MARKET_MAP = {"プライム": "Prime", "スタンダード": "Standard", "グロース": "Growth"}
+DEFAULT_MARKETS = ("Prime", "Standard", "Growth")
+
+
+def fetch_listed_tickers(markets: tuple[str, ...] = DEFAULT_MARKETS) -> pd.DataFrame:
+    """Download JPX listed companies XLS and return equity tickers.
+
+    Args:
+        markets: normalized market labels to include (Prime/Standard/Growth).
+            ETF/REIT/foreign/PRO are always excluded (内国株式の3市場のみ)。
 
     Returns:
         DataFrame with columns: ticker, company_name, market
@@ -33,20 +42,25 @@ def fetch_prime_tickers() -> pd.DataFrame:
 
     rows = []
     for r in range(1, ws.nrows):
-        market = ws.cell_value(r, 3)
-        if "プライム" not in market:
+        raw_market = ws.cell_value(r, 3)
+        norm = next((v for k, v in _MARKET_MAP.items() if k in raw_market), None)
+        if norm is None or norm not in markets:
             continue
         code = ws.cell_value(r, 1)
-        # Code may be float (e.g. 1301.0) or string
-        if isinstance(code, float):
+        if isinstance(code, float):  # code may be float (e.g. 1301.0) or string
             code = str(int(code))
-        ticker = f"{code}.T"
-        company_name = ws.cell_value(r, 2)
-        rows.append({"ticker": ticker, "company_name": company_name, "market": "Prime"})
+        rows.append({"ticker": f"{code}.T", "company_name": ws.cell_value(r, 2),
+                     "market": norm})
 
     df = pd.DataFrame(rows)
-    logger.info("Found %d Prime tickers", len(df))
+    by_mkt = df["market"].value_counts().to_dict()
+    logger.info("Found %d tickers %s", len(df), by_mkt)
     return df
+
+
+# backward-compatible alias (Prime only)
+def fetch_prime_tickers() -> pd.DataFrame:
+    return fetch_listed_tickers(markets=("Prime",))
 
 
 def load_ticker_master(force_refresh: bool = False) -> pd.DataFrame:
@@ -62,7 +76,7 @@ def load_ticker_master(force_refresh: bool = False) -> pd.DataFrame:
         logger.info("Loading ticker master from cache: %s", _CACHE_FILE)
         return pd.read_parquet(_CACHE_FILE)
 
-    df = fetch_prime_tickers()
+    df = fetch_listed_tickers()
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(_CACHE_FILE, index=False)
     logger.info("Saved ticker master to %s", _CACHE_FILE)

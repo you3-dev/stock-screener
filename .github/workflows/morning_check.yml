@@ -1,8 +1,10 @@
 name: Morning Gap Check
 
+# 朝チェック(08:50 JST = 23:50 UTC 前日, 平日)。設計: docs/12。
+# 地合い(レジーム)を更新し、当日ウォッチリストの軽量ギャップチェックを出力。
+# macro.parquet(地合いバナー)と market_check.txt を Release に反映。
 on:
   schedule:
-    # 08:50 JST = 23:50 UTC (previous day), weekdays only
     - cron: '50 23 * * 0-4'
   workflow_dispatch:
 
@@ -13,9 +15,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -32,15 +33,16 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run morning check
+      - name: Run morning check (regime refresh + gap check)
         run: uv run python scripts/morning_check.py
 
-      - name: Upload market check result to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload regime + gap result to GitHub Release
         run: |
+          gh release view data-latest 2>/dev/null || \
+            gh release create data-latest \
+              --title "Latest data cache" \
+              --notes "Auto-updated by pipeline"
+          gh release upload data-latest data_cache/macro.parquet --clobber
           if [ -f data_cache/market_check.txt ]; then
-            gh release upload data-latest \
-              data_cache/market_check.txt \
-              --clobber
+            gh release upload data-latest data_cache/market_check.txt --clobber
           fi

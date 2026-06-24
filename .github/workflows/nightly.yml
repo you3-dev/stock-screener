@@ -1,18 +1,30 @@
 name: Nightly Pipeline
 
+# 夜間バッチ(21:00 JST = 12:00 UTC, 平日)。設計: docs/06 §8 / docs/12。
+# 価格(全3市場・adj_close保持)→ 特徴量 + マクロ/レジーム → 毒性ファイナンス前進取込 →
+# GitHub Release(data-latest)へアップロード。Streamlit Cloud が起動時にDLする。
 on:
   schedule:
-    # 21:00 JST = 12:00 UTC, weekdays only
     - cron: '0 12 * * 1-5'
   workflow_dispatch:
+    inputs:
+      events_days_back:
+        description: 'financing events lookback (days). 初回ブートストラップは 90 推奨'
+        default: '14'
 
 permissions:
   contents: write
+
+concurrency:
+  group: data-pipeline
+  cancel-in-progress: false
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
@@ -29,22 +41,31 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run pipeline
+      - name: Pull accumulated events from release (best-effort)
+        run: |
+          mkdir -p data_cache
+          gh release download data-latest -D data_cache -p "financing_events.parquet" --clobber \
+            || echo "no prior events in release (first run)"
+
+      - name: Fetch prices (Prime+Standard+Growth, keeps adj_close, resumable)
+        run: uv run python scripts/fetch_prices.py
+
+      - name: Build features + macro/regime
         run: uv run python scripts/run_pipeline.py
 
-      - name: Upload data to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Forward-ingest financing events (yanoshin, layer B)
+        run: uv run python scripts/ingest_events.py --days-back ${{ github.event.inputs.events_days_back || '14' }}
+
+      - name: Upload data cache to GitHub Release
         run: |
-          # Create release if it doesn't exist yet
           gh release view data-latest 2>/dev/null || \
             gh release create data-latest \
               --title "Latest data cache" \
               --notes "Auto-updated by nightly pipeline"
-          # Upload parquet files (--clobber overwrites existing assets)
           gh release upload data-latest \
             data_cache/prices.parquet \
             data_cache/features.parquet \
-            data_cache/backtest_results.parquet \
             data_cache/ticker_master.parquet \
+            data_cache/financing_events.parquet \
+            data_cache/macro.parquet \
             --clobber

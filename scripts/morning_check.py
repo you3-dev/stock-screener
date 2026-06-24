@@ -1,129 +1,90 @@
-"""Pre-market gap check script (08:50 JST).
+"""Pre-market check (08:50 JST) — layer-A-demoted edition (docs/12).
 
-Compares previous close to latest price data and classifies
-each screening candidate by gap threshold.
+Morning value in the new model = the regime banner being current, plus a light
+gap check on today's watchlist.  Does NOT mutate prices.parquet (the old
+update_prices dropped adj_close); recent closes are fetched ad hoc.
 
 Usage:
     uv run python scripts/morning_check.py
 """
+from __future__ import annotations
 
 import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from src.backtest.engine import load_backtest_results
-from src.data.config import load_config
-from src.data.price_downloader import update_prices
-from src.data.release_store import ensure_data_available
-from src.features.engineer import load_features
-from src.screening.screener import screen_candidates
+import yfinance as yf
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
-)
+from src.data.config import load_config
+from src.features.engineer import load_features
+from src.ingest.financing_events import load_events
+from src.overlay.integration import current_regime
+from src.screening.screener import screen_candidates_v2
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-_CACHE_DIR = Path(__file__).resolve().parent.parent / "data_cache"
-_CHECK_FILE = _CACHE_DIR / "market_check.txt"
+_CACHE = Path(__file__).resolve().parent.parent / "data_cache"
+_CHECK_FILE = _CACHE / "market_check.txt"
 
 
 def main() -> None:
-    """Run pre-market gap check."""
-    logger.info("=== Morning gap check started ===")
+    logger.info("=== morning check started ===")
+    try:
+        from src.data.release_store import ensure_data_available
+        ensure_data_available()
+    except Exception:
+        logger.warning("release fetch skipped", exc_info=True)
 
     cfg = load_config()
-    gap_cfg = cfg["premarket_gap"]
-    ok_max = gap_cfg["ok_max"]
-    caution_max = gap_cfg["caution_max"]
+    ok_max = cfg["premarket_gap"]["ok_max"]
+    caution_max = cfg["premarket_gap"]["caution_max"]
 
-    # 0. Download data from GitHub Release if not cached locally
-    if not ensure_data_available():
-        logger.error("Failed to obtain cached data. Run nightly pipeline first.")
-        sys.exit(1)
+    # 1. regime (the key morning signal) — refreshes macro.parquet
+    reg = current_regime()
+    logger.info("regime asof %s: %s (size x%.1f)", reg["asof"], reg["label"], reg["size_factor"])
 
-    # 1. Load previous screening candidates
-    features = load_features()
-    backtest = load_backtest_results()
-    if features is None or backtest is None:
-        logger.error("Missing cached data. Run nightly pipeline first.")
-        sys.exit(1)
+    # 2. today's watchlist (layer A demoted) + red flags (layer B)
+    lines = [f"morning check {datetime.now():%Y-%m-%d %H:%M}", "=" * 50,
+             f"地合い: {reg['label']} (asof {reg['asof']}) 推奨サイズ x{reg['size_factor']:.1f}"]
+    feats = load_features()
+    tickers: list[str] = []
+    if feats is not None:
+        cand = screen_candidates_v2(feats, load_events())
+        watch = cand[~cand["red_flag"]] if "red_flag" in cand and not cand.empty else cand
+        flagged = cand[cand["red_flag"]] if "red_flag" in cand and not cand.empty else cand.iloc[0:0]
+        tickers = watch["ticker"].tolist()
+        lines.append(f"ウォッチ {len(watch)}件 / 🚩回避 {len(flagged)}件")
+    else:
+        lines.append("features キャッシュ無し(夜間バッチ未実行)")
 
-    candidates = screen_candidates(features, backtest)
-    if candidates.empty:
-        logger.info("No candidates to check.")
-        _write_result("No candidates to check.", [])
-        return
+    # 3. light gap check (best-effort; no cache mutation)
+    if tickers:
+        lines.append("-" * 50)
+        try:
+            raw = yf.download(tickers, period="5d", auto_adjust=True, progress=False)
+            close = raw["Close"] if "Close" in raw else raw
+            for t in tickers:
+                s = close[t].dropna() if t in getattr(close, "columns", []) else close.dropna()
+                if len(s) < 2:
+                    lines.append(f"{t:>10s}  gap=     N/A  データ不足"); continue
+                gap = float(s.iloc[-1] / s.iloc[-2] - 1)
+                status = "OK" if gap <= ok_max else ("注意" if gap <= caution_max else "除外推奨")
+                lines.append(f"{t:>10s}  gap={gap:+7.2%}  {status}")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"(gap check skipped: {type(e).__name__})")
 
-    candidate_tickers = candidates["ticker"].tolist()
-    logger.info("Checking %d candidates", len(candidate_tickers))
-
-    # 2. Update prices with recent data
-    logger.info("Updating recent prices...")
-    prices = update_prices(candidate_tickers, recent_days=3)
-
-    if prices.empty:
-        logger.warning("No price data available.")
-        _write_result("No price data available.", [])
-        return
-
-    # 3. Get latest two closes for each candidate
-    results = []
-    for ticker in candidate_tickers:
-        tp = prices[prices["ticker"] == ticker].sort_values("date")
-        if len(tp) < 2:
-            results.append({"ticker": ticker, "gap": None, "status": "データ不足"})
-            continue
-
-        prev_close = tp["close"].iloc[-2]
-        latest_close = tp["close"].iloc[-1]
-        gap = latest_close / prev_close - 1
-
-        if gap <= ok_max:
-            status = "OK"
-        elif gap <= caution_max:
-            status = "注意"
-        else:
-            status = "除外推奨"
-
-        results.append({"ticker": ticker, "gap": gap, "status": status})
-
-    # 4. Output results
-    _write_result(
-        f"Gap check: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        results,
-    )
-
-    # 5. Summary log
-    for r in results:
-        gap_str = f"{r['gap']:+.2%}" if r["gap"] is not None else "N/A"
-        logger.info("  %s | gap=%s | %s", r["ticker"], gap_str, r["status"])
-
-    ok_count = sum(1 for r in results if r["status"] == "OK")
-    caution_count = sum(1 for r in results if r["status"] == "注意")
-    exclude_count = sum(1 for r in results if r["status"] == "除外推奨")
-    logger.info("Summary: OK=%d, Caution=%d, Exclude=%d", ok_count, caution_count, exclude_count)
-
-    logger.info("=== Morning gap check completed ===")
-
-
-def _write_result(header: str, results: list[dict]) -> None:
-    """Write gap check results to text file."""
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    lines = [header, "=" * 50]
-    for r in results:
-        gap_str = f"{r['gap']:+.2%}" if r.get("gap") is not None else "N/A"
-        lines.append(f"{r['ticker']:>10s}  gap={gap_str:>8s}  {r['status']}")
-    lines.append("")
-    _CHECK_FILE.write_text("\n".join(lines), encoding="utf-8")
-    logger.info("Results written to %s", _CHECK_FILE)
+    _CACHE.mkdir(parents=True, exist_ok=True)
+    _CHECK_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("wrote %s", _CHECK_FILE)
+    logger.info("=== morning check completed ===")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception:
-        logger.exception("Morning check failed")
+        logger.exception("morning check failed")
         sys.exit(1)
